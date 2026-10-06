@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Powder Lab</title>
+<style>
+:root{--bg:#eef1f5;--panel:#fff;--ink:#16202b;--mut:#5b6877;--line:#d5dbe3;--acc:#0a84d6;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1116;--panel:#171c24;--ink:#e6edf3;--mut:#8b96a5;--line:#2a3340;--acc:#4cc2ff}}
+:root[data-theme="dark"]{--bg:#0e1116;--panel:#171c24;--ink:#e6edf3;--mut:#8b96a5;--line:#2a3340;--acc:#4cc2ff}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+header b{font-size:16px;margin-right:8px}
+button,select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font:inherit;cursor:pointer}
+button:hover{border-color:var(--acc)}
+button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+label{display:flex;gap:6px;align-items:center;color:var(--mut)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 230px;gap:12px;padding:12px}
+@media(max-width:780px){main{grid-template-columns:1fr}}
+canvas{width:100%;height:auto;aspect-ratio:256/160;image-rendering:pixelated;background:#0a0c10;border-radius:10px;border:1px solid var(--line);touch-action:none;display:block;cursor:crosshair}
+aside{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px}
+h4{margin:10px 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
+h4:first-child{margin-top:0}
+.pal{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.pal button{display:flex;align-items:center;gap:6px;padding:5px 7px;text-align:left}
+.sw{width:12px;height:12px;border-radius:3px;flex:none;border:1px solid rgba(128,128,128,.4)}
+#stats{font-variant-numeric:tabular-nums;color:var(--mut)}
+#stats b{color:var(--ink)}
+.hint{color:var(--mut);font-size:12px;padding:0 12px 12px}
+</style></head><body>
+<header>
+<b>Powder Lab</b>
+<button id="pause">Pause</button><button id="step">Step</button><button id="clear">Clear</button><button id="demo">Load demo</button>
+<button id="sws" class="on">Switches: ON</button>
+<label>Brush <input id="br" type="range" min="1" max="12" value="3"></label>
+<label>Speed <select id="spd"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option></select></label>
+<label><input id="snd" type="checkbox" checked>Sound</label>
+</header>
+<main>
+<canvas id="c"></canvas>
+<aside><div id="pal"></div><h4>Circuit readout</h4><div id="stats"></div></aside>
+</main>
+<div class="hint">Draw with the mouse or touch. Batteries power wire and metal; lamps, buzzers and heaters are the outputs. Space = pause, [ ] = brush size.</div>
+<script>
+const W=256,H=160,N=W*H;
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');cv.width=W;cv.height=H;
+const img=ctx.createImageData(W,H),buf=new Uint32Array(img.data.buffer);
+const T=new Uint8Array(N),A=new Uint8Array(N),V=new Uint8Array(N),P=new Uint8Array(N),M=new Uint8Array(N);
+// name, color, kind(0 static,1 powder,2 liquid,3 gas), density
+const MAT=[['Eraser',0x0a0c10,3,0],['Sand',0xe0c070,1,5],['Water',0x2f7be0,2,3],['Oil',0x6a4a22,2,2.5],['Lava',0xff5a1a,2,6],
+['Stone',0x7b8088,0,99],['Wood',0x8a5a2b,0,99],['Ice',0xa8e4ff,0,99],['Plant',0x2fa84a,0,99],['Metal',0xb0b7c3,0,99],
+['Gunpowder',0x4a4a52,1,5.5],['Fire',0xff8a20,3,.1],['Steam',0xc8d2dc,3,.2],
+['Wire',0xd98a2b,0,99],['Battery',0x3ddc6a,0,99],['Lamp',0x6b6a3a,0,99],['Buzzer',0x2b2b2b,0,99],['Heater',0x7a2a2a,0,99],['Switch',0x4a8fd6,0,99],['Pressure Plate',0x8a7a5a,0,99]];
+const K=MAT.map(m=>m[2]),D=MAT.map(m=>m[3]),R=MAT.map(m=>m[1]>>16&255),G=MAT.map(m=>m[1]>>8&255),B=MAT.map(m=>m[1]&255);
+const FLAM=[];[3,6,8,10].forEach(i=>FLAM[i]=1);
+const REACT=[];[4,7,8,11,17].forEach(i=>REACT[i]=1);
+const COND=[];[9,13,14,15,16].forEach(i=>COND[i]=1);
+let swOn=true,sel=1,frame=0,tok=1,paused=false;
+const rnd=Math.random;
+
+function tswap(a,b){let t=T[a];T[a]=T[b];T[b]=t;t=A[a];A[a]=A[b];A[b]=t;t=V[a];V[a]=V[b];V[b]=t;M[a]=M[b]=tok}
+const can=(d,j)=>K[T[j]]>=2&&D[T[j]]<d;
+
+function fall(i,x,y,t,k){
+  const d=D[t];
+  if(t===4&&rnd()<.6)return;
+  if(y<H-1){
+    if(can(d,i+W)){tswap(i,i+W);return}
+    const s=rnd()<.5?-1:1;
+    for(const q of [s,-s]){const nx=x+q;if(nx>=0&&nx<W&&can(d,i+W+q)&&(k===1||can(d,i+q))){tswap(i,i+W+q);return}}
+  }
+  if(k===2){
+    const s=rnd()<.5?-1:1;
+    for(const q of [s,-s]){
+      let p=i;for(let n=0;n<4;n++){const nx=(p%W)+q;if(nx<0||nx>=W||!can(d,p+q))break;p+=q}
+      if(p!==i){tswap(i,p);return}
+    }
+  }
+}
+function gas(i,x,y,t){
+  if(A[i]===0){T[i]=(t===12&&rnd()<.6)?2:0;return}
+  A[i]--;
+  let tgt=-1;
+  if(y>0&&(t===12||rnd()<.7)){const dx=((rnd()*3)|0)-1,nx=x+dx;if(nx>=0&&nx<W&&T[i-W+dx]===0)tgt=i-W+dx}
+  if(tgt<0&&rnd()<.5){const dx=rnd()<.5?-1:1,nx=x+dx;if(nx>=0&&nx<W&&T[i+dx]===0)tgt=i+dx}
+  if(tgt>=0)tswap(i,tgt);
+}
+function ignite(n){if(T[n]===10)explode(n);else{T[n]=11;A[n]=25+rnd()*30}}
+function explode(n){
+  const cx=n%W,cy=(n/W)|0,r=5;
+  for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
+    const x=cx+dx,y=cy+dy;if(x<0||y<0||x>=W||y>=H||dx*dx+dy*dy>r*r)continue;
+    const j=y*W+x;if(T[j]!==9&&T[j]!==5){T[j]=11;A[j]=8+rnd()*22}
+  }
+}
+const NX=[1,-1,0,0],NY=[0,0,1,-1];
+function react(i,x,y,t){
+  const r=(rnd()*4)|0,nx=x+NX[r],ny=y+NY[r];
+  if(nx<0||ny<0||nx>=W||ny>=H)return;
+  const n=ny*W+nx,u=T[n];
+  if(t===11){
+    if(FLAM[u]&&rnd()<.35)ignite(n);
+    else if(u===2){T[n]=12;A[n]=120+rnd()*100;T[i]=0}
+    else if(u===7)T[n]=2;
+  }else if(t===4){
+    if(u===2){T[n]=12;A[n]=140;T[i]=5}
+    else if(FLAM[u])ignite(n);
+    else if(u===7)T[n]=2;
+  }else if(t===7){
+    if(u===11||u===4||(u===17&&P[n]))T[i]=2;
+  }else if(t===8){
+    if(u===2&&rnd()<.04){const gx=x+((rnd()*3)|0)-1,gy=y-1;
+      if(gx>=0&&gy>=0&&gx<W&&T[gy*W+gx]===0){T[gy*W+gx]=8;T[n]=0}}
+  }else if(t===17&&P[i]){
+    if(u===2){T[n]=12;A[n]=120}else if(u===7)T[n]=2;else if(FLAM[u])ignite(n);
+  }
+}
+function step(){
+  frame++;tok=(frame%254)+1;const lr=frame&1;
+  for(let y=H-1;y>=0;y--)for(let xx=0;xx<W;xx++){
+    const x=lr?W-1-xx:xx,i=y*W+x,t=T[i];
+    if(!t||M[i]===tok)continue;
+    const k=K[t];
+    if(k===1||k===2)fall(i,x,y,t,k);else if(k===3)gas(i,x,y,t);
+    if(REACT[t]&&T[i]===t)react(i,x,y,t);
+  }
+}
+const stack=new Int32Array(N);
+// plate is pressed when a powder or liquid rests on top of its column
+function pressed(i){let j=i-W;while(j>=0&&T[j]===19)j-=W;return j>=0&&(K[T[j]]===1||K[T[j]]===2)&&T[j]!==0}
+function power(){
+  P.fill(0);let sp=0;
+  for(let i=0;i<N;i++)if(T[i]===14||(T[i]===19&&pressed(i))){P[i]=1;stack[sp++]=i}
+  while(sp){
+    const i=stack[--sp],x=i%W,y=(i/W)|0;
+    for(let r=0;r<4;r++){
+      const nx=x+NX[r],ny=y+NY[r];if(nx<0||ny<0||nx>=W||ny>=H)continue;
+      const n=ny*W+nx,u=T[n];
+      if(!P[n]&&(COND[u]||(u===17)||(u===18&&swOn)||(u===19&&pressed(n)))){P[n]=1;stack[sp++]=n}
+    }
+  }
+}
+const cl=v=>v<0?0:v>255?255:v|0,px=(r,g,b)=>0xff000000|(cl(b)<<16)|(cl(g)<<8)|cl(r);
+const st={pw:0,lampL:0,lampT:0,buz:0,heat:0,bat:0,n:0};
+function render(){
+  const lamps=[];st.pw=st.lampL=st.lampT=st.buz=st.heat=st.bat=st.n=0;
+  for(let i=0;i<N;i++){
+    const t=T[i];let r=R[t],g=G[t],b=B[t];const p=P[i];
+    if(t){st.n++;
+      if(t===11){r=255;g=140;b=30}
+      
+      
+      if(t===14)st.bat++;
+      if(t===13&&p){r=255;g=225;b=90}
+      else if(t===9&&p){r=150;g=200;b=255}
+      else if(t===15){st.lampT++;if(p){r=255;g=245;b=170;st.lampL++;lamps.push(i)}}
+      else if(t===17){if(p){r=255;g=70;b=30;st.heat++}}
+      else if(t===16&&p){st.buz++;if(frame&4){r=200;g=200;b=200}}
+      else if(t===18){if(swOn){r=120;g=200;b=255}else{r=60;g=80;b=110}}
+      else if(t===19&&pressed(i)){r=110;g=230;b=120}
+      if(p)st.pw++;
+    }
+    buf[i]=px(r,g,b);
+  }
+  ctx.putImageData(img,0,0);
+}
+// ---- UI
+const pal=document.getElementById('pal');
+[['Materials',[1,2,3,4,10,12]],['Solids',[5,6,7,8,9]],['Heat',[11]],['Circuit',[13,14,15,16,17,18,19]],['Tools',[0]]].forEach(([n,ids])=>{
+  const h=document.createElement('h4');h.textContent=n;pal.appendChild(h);
+  const d=document.createElement('div');d.className='pal';pal.appendChild(d);
+  ids.forEach(id=>{
+    const b=document.createElement('button');b.dataset.id=id;
+    const c='#'+MAT[id][1].toString(16).padStart(6,'0');
+    b.innerHTML='<span class="sw" style="background:'+c+'"></span>'+MAT[id][0];
+    if(id===sel)b.classList.add('on');
+    b.onclick=()=>{sel=id;pal.querySelectorAll('button').forEach(x=>x.classList.toggle('on',+x.dataset.id===id))};
+    d.appendChild(b);
+  });
+});
+const $=id=>document.getElementById(id);
+$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'Resume':'Pause';$('pause').classList.toggle('on',paused)};
+$('step').onclick=()=>{step();power();render()};
+$('clear').onclick=()=>{T.fill(0);A.fill(0);P.fill(0)};
+$('sws').onclick=()=>{swOn=!swOn;$('sws').textContent='Switches: '+(swOn?'ON':'OFF');$('sws').classList.toggle('on',swOn)};
+let speed=1;$('spd').onchange=e=>speed=+e.target.value;
+document.addEventListener('keydown',e=>{
+  if(e.code==='Space'){e.preventDefault();$('pause').click()}
+  if(e.key==='['){$('br').value=Math.max(1,+$('br').value-1)}
+  if(e.key===']'){$('br').value=Math.min(12,+$('br').value+1)}
+});
+function paint(cx,cy){
+  const r=+$('br').value,st_=K[sel]===0&&sel!==0;
+  for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
+    if(dx*dx+dy*dy>r*r+1)continue;
+    const x=cx+dx,y=cy+dy;if(x<0||y<0||x>=W||y>=H)continue;
+    const i=y*W+x;
+    if(sel===0){T[i]=0;A[i]=0;continue}
+    if(st_||T[i]===0){
+      if(!st_&&rnd()>.55)continue;
+      T[i]=sel;A[i]=sel===11?20+rnd()*30:sel===12?100+rnd()*100:0;V[i]=rnd()*255;
+    }
+  }
+}
+let down=false,lx=0,ly=0;
+const pos=e=>{const r=cv.getBoundingClientRect();return[Math.floor((e.clientX-r.left)/r.width*W),Math.floor((e.clientY-r.top)/r.height*H)]};
+cv.addEventListener('pointerdown',e=>{down=true;cv.setPointerCapture(e.pointerId);[lx,ly]=pos(e);paint(lx,ly);initAudio()});
+cv.addEventListener('pointermove',e=>{
+  if(!down)return;const[x,y]=pos(e);const n=Math.max(Math.abs(x-lx),Math.abs(y-ly),1);
+  for(let s=1;s<=n;s++)paint(Math.round(lx+(x-lx)*s/n),Math.round(ly+(y-ly)*s/n));lx=x;ly=y;
+});
+['pointerup','pointercancel'].forEach(ev=>cv.addEventListener(ev,()=>down=false));
+// ---- audio
+let ac,gn;
+function initAudio(){if(ac)return;try{ac=new(window.AudioContext||window.webkitAudioContext)();const o=ac.createOscillator();gn=ac.createGain();gn.gain.value=0;o.type='square';o.frequency.value=520;o.connect(gn);gn.connect(ac.destination);o.start()}catch(e){ac=null}}
+// ---- demo
+function rect(x0,y0,x1,y1,t){for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const i=y*W+x;T[i]=t;V[i]=rnd()*255;A[i]=0}}
+function demo(){
+  T.fill(0);A.fill(0);
+  rect(0,150,255,159,5);
+  rect(20,138,23,141,14);rect(24,139,60,140,13);rect(61,137,66,142,15);rect(67,139,95,140,13);rect(78,139,84,140,19);
+  rect(96,138,98,141,18);rect(99,139,130,140,13);rect(131,136,136,143,17);rect(106,134,110,138,16);
+  rect(131,128,136,135,7);
+  rect(150,120,152,149,5);rect(200,120,202,149,5);rect(153,125,199,149,2);
+  rect(30,60,50,70,1);rect(210,142,225,149,10);rect(212,134,228,141,6);rect(160,100,170,104,8);
+}
+$('demo').onclick=demo;demo();
+// ---- loop
+const sEl=$('stats');
+function loop(){
+  if(!paused)for(let s=0;s<speed;s++)step();
+  power();render();
+  if(gn)gn.gain.setTargetAtTime(st.buz&&$('snd').checked&&!paused?.03:0,ac.currentTime,.02);
+  if(frame%8===0)sEl.innerHTML='Particles: <b>'+st.n+'</b><br>Powered cells: <b>'+st.pw+'</b><br>Batteries: <b>'+st.bat+'</b><br>Lamps lit: <b>'+st.lampL+' / '+st.lampT+'</b><br>Buzzers on: <b>'+st.buz+'</b><br>Heater cells on: <b>'+st.heat+'</b><br>Switches: <b>'+(swOn?'closed':'open')+'</b>';
+  requestAnimationFrame(loop);
+}
+loop();
+</script></body></html>
